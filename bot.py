@@ -1,3 +1,4 @@
+import os
 import discord
 import asyncio
 import logging  # Import the logging module
@@ -31,7 +32,7 @@ class DiscordBot:
 
     async def on_ready(self):
         logging.info(f'{self.client.user} has connected to Discord!')
-        
+
         # Start the crypto service monitoring task
         self.client.loop.create_task(self.polling_service.monitor_and_notify_satoshi_rate_changes())
 
@@ -40,14 +41,20 @@ class DiscordBot:
             while True:
                 message = await self.polling_service.check_for_trigger()
                 if message:
-                    await channel.send(message)
-                await asyncio.sleep(60)  # Poll every 60 seconds
+                    try:
+                        await channel.send(message)
+                        logging.info(f"Sent message: {message}")
+                    except Exception as e:
+                        logging.error(f"Error sending message: {e}")
+                else:
+                    logging.info("No new messages to send.")
+                await asyncio.sleep(120)
 
 # Initialize the crypto polling service
 crypto_service = CryptoPollingService()
 
 # Initialize the Discord bot
-bot_token = 'MTE4OTIyMTU3MDIyNTM4OTc0OQ.G_axDu.s7Osa5NULGPZBpiQVxxD7E30Y1wW4gHMzgYLn8'  # Replace with your bot token
+bot_token = os.environ.get('DISCORD_BOT_TOKEN')
 channel_id = '1184868864148910152'  # Replace with your channel ID
 
 discord_bot = DiscordBot(bot_token, crypto_service, channel_id)

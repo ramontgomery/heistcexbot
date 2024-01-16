@@ -1,6 +1,8 @@
 import ccxt
+import pandas as pd
 import asyncio
 import ccxt.async_support as async_ccxt
+import csv
 
 from datetime import datetime, timedelta
 import logging  # Import the logging module
@@ -22,27 +24,40 @@ class CryptoPollingService:
         self.logger.addHandler(ch)
 
     async def monitor_and_notify_satoshi_rate_changes(self):
-        self.logger.info("Starting monitoring of Satoshi rates.")
-        common_symbols = await self.get_common_symbols()
+        csv_file_path = 'satoshi_rates.csv'  # Define the CSV file path
 
-        if not common_symbols:
-            self.logger.info("No common symbols found between exchanges.")
-            return
+        while True:  # Loop indefinitely
+            self.logger.info("Starting monitoring of Satoshi rates.")
+            common_symbols = await self.get_common_symbols()
 
-        current_satoshi_rates = await self.calculate_satoshi_rates_for_symbols(common_symbols)
-        self.logger.debug(f"Current Satoshi rates: {current_satoshi_rates}")
+            if not common_symbols:
+                self.logger.info("No common symbols found between exchanges.")
+            else:
+                current_satoshi_rates = await self.calculate_satoshi_rates_for_symbols(common_symbols)
+                
+                # Append new Satoshi rates to the CSV file
+                with open(csv_file_path, 'a', newline='') as file:
+                    writer = csv.writer(file)
+                    for symbol, rate in current_satoshi_rates.items():
+                        writer.writerow([symbol, rate])
 
-        for symbol in current_satoshi_rates:
-            previous_rate = self.previous_satoshi_rates.get(symbol)
-            if previous_rate is not None:
-                rate_change = abs(current_satoshi_rates[symbol] - previous_rate) / previous_rate
-                if rate_change > 0.0001 and self.is_within_1_hour():
-                    message = f"SatoshiRate for {symbol} changed by more than 0.01% in the last hour: {current_satoshi_rates[symbol]} compared to {previous_rate}"
-                    self.messages_to_send.append(message)
-                    self.logger.info(message)
+                # Process rate changes and message queuing
+                for symbol in current_satoshi_rates:
+                    previous_rate = self.previous_satoshi_rates.get(symbol)
+                    if previous_rate is not None and previous_rate != 0:
+                        rate_change = abs(current_satoshi_rates[symbol] - previous_rate) / previous_rate
+                        if rate_change > 0.0001:  # Check the threshold for notifying rate change
+                            message = f"SatoshiRate for {symbol} changed by more than 0.02% in the last hour: {current_satoshi_rates[symbol]} compared to {previous_rate}"
+                            self.messages_to_send.append(message)
+                            self.logger.info(message)
+                    elif previous_rate == 0:
+                        self.logger.debug(f"Previous rate for {symbol} is zero, skipping rate change calculation.")
 
-            self.previous_satoshi_rates[symbol] = current_satoshi_rates[symbol]
-        self.last_updated_time = datetime.utcnow()
+                    self.previous_satoshi_rates[symbol] = current_satoshi_rates[symbol]
+
+            self.last_updated_time = datetime.utcnow()
+            await asyncio.sleep(60)  # Wait for 60 seconds before next cycle
+            await asyncio.sleep(60)  # Wait for 60
     async def calculate_satoshi_rates_for_symbols(self, symbols):
         satoshi_rates = {}
         for symbol in symbols:
@@ -56,13 +71,17 @@ class CryptoPollingService:
         else:
             return None
 
-    def is_within_1_hour(self):
-        # Check if the current time is within one hour of the last updated time
-        return (datetime.utcnow() - self.last_updated_time) <= timedelta(hours=1)
 
     def map_bybit_to_coinbase(self, symbol):
+        # Remove the additional segment and replace '/USDT' with '/USD'
+        symbol = symbol.split(':')[0]
         if symbol.endswith('/USDT'):
             return symbol.replace('/USDT', '/USD')
+        return symbol
+
+    def map_coinbase_to_bybit(self, symbol):
+        if symbol.endswith('/USD'):
+            return symbol.replace('/USD', '/USDT')
         # Add more mappings if needed
         return symbol
 
@@ -81,22 +100,24 @@ class CryptoPollingService:
             bybit_tickers = await self.bybit.fetch_tickers()
             coinbasepro_tickers = await self.coinbasepro.fetch_tickers()
 
-            # Normalize and map symbols from Bybit
-            symbols_bybit = {self.map_bybit_to_coinbase(self.normalize_symbol(s)) for s in bybit_tickers.keys()}
-            symbols_coinbase = {self.normalize_symbol(s) for s in coinbasepro_tickers.keys()}
+            # New implementation for symbol mapping
+            mapped_symbols_bybit = {s: self.map_bybit_to_coinbase(s) for s in bybit_tickers.keys()}
+            symbols_coinbase = {s.split('/')[0] for s in coinbasepro_tickers.keys()}  # Extract base currency for Coinbase symbols
 
-            # Find common symbols
-            common_symbols = symbols_bybit.intersection(symbols_coinbase)
-            self.logger.info(f"Common symbols: {common_symbols}")
+            common_symbols = {s for s in mapped_symbols_bybit.values() if s.split('/')[0] in symbols_coinbase}
+
             return list(common_symbols)
-
         except Exception as e:
             self.logger.error(f"Error getting common symbols: {e}")
             return []
     async def calculate_satoshi_rate(self, symbol):
+        
         try:
-            bybit_futures_price = await self.fetch_bybit_futures_price(symbol)
-            coinbase_spot_price = await self.fetch_coinbase_spot_price(symbol)
+            bybit_symbol = self.map_coinbase_to_bybit(symbol)
+            coinbase_symbol = symbol
+
+            bybit_futures_price = await self.fetch_bybit_futures_price(bybit_symbol)
+            coinbase_spot_price = await self.fetch_coinbase_spot_price(coinbase_symbol)
             if bybit_futures_price is not None and coinbase_spot_price is not None:
                 satoshi_rate = (coinbase_spot_price - bybit_futures_price) / bybit_futures_price * 100
                 self.logger.debug(f"Satoshi rate for {symbol}: {satoshi_rate}")
